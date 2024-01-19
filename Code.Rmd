@@ -1,0 +1,1348 @@
+---
+title: "BANK TARGETING CAMPAIGN"
+author: "Scatto G., Volpato P."
+date: "24/05/2023"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Bank Institution - Targeting Campaign
+
+### Importing Libraries
+```{r, echo=FALSE, message=FALSE}
+library(caret)
+library(data.table)
+library(factoextra)
+library(gridExtra)
+library(plyr)
+library(dplyr)
+library(corrplot)
+library(class)
+library(stringr)
+library(party)
+library(MASS)
+library(partykit)
+require(ROCR) 
+library(glmnet)
+library(ROSE)
+library(fastDummies)
+library(RColorBrewer)
+
+cat('... libraries uploaded.')
+```
+
+## Overview
+
+In today's highly competitive business landscape, financial institutions strive to identify key factors that contribute to their success. A crucial aspect of their operations is accurately assessing the potential revenue generation of customers. By understanding the key factors distinguishing good from bad customers,institutions can optimize their marketing strategies and tailor product offerings, to invest only on who they think will be profitable. 
+
+The report will follow a structured approach, starting with pre-processing the data, addressing missing values, encoding categorical variables, and performing feature engineering as necessary.  We will then proceed to perform some exploratory data analysis to gain a comprehensive understanding of the dataset. Subsequently, we will build and evaluate various predictive models, comparing their performance to identify the most accurate and reliable solution for revenue prediction.
+
+## Dataset Introduction
+
+```{r, include=TRUE, echo=TRUE}
+risk_data <- read.csv("Risk.csv", header=TRUE, sep= ";") 
+
+# To have the starting letter uppercase
+Headers<-colnames(risk_data)
+Headers<-lapply(lapply(Headers,str_to_lower), str_to_title)
+names(risk_data)<-Headers
+last = length(risk_data)-1
+
+head(risk_data)
+summary(risk_data)
+
+```
+
+
+The dataset presents information about 4117 previous customers of the company, with 16 attributes (or variables) per customer, one of them being the 'Risk' target variable. 
+When we import the varibale this variable is categorical and presents 3 different levels: "bad loss",  "bad profit", "good risk". To transform this problem into a binary classification one, we have to encode the attribute "Risk" in a binary categorical variable. To do so, we incorporated together "bad profit" and "bad loss" under the 0 value, and "good risk" under the 1 value. As introduced above, our goal is to find customers with a high likelihood of being profitable, in order to invest more on them, and drop customers whose revenue profile is not promising. The information we have on hand are:
+
+* ID: unique identifier of the customer
+* Age:	Age
+* Income: Annual Income
+* Gender:	Gender
+* Marital:	Marital status of the customer (married / single / divsepwid)
+* Numkids:	Number of kids
+* Numcards:	Number of credit cards headed
+* Howpaid:	Frequency of the wage payment
+* Employed_days: Number of days the customer has been employed
+* Mortgage: If the customer has a mortgage (Flag variable)
+* Mortgage_amount: The amount of the mortgage (if active)
+* Storecar:	Number of store cards headed to the customers
+* Loans:	Number of active loans
+* Loan_amount: Total amount of all the active loans
+* Credit_score: Score between 0 and 1 given by the financial instution to the spending behavior of the customer
+* Risk: Typology of credit risk
+
+## Data Pre-processing
+
+### Check for missing data and duplicated values
+
+Firstly, we analyze the presence of missing data in our dataset:
+
+```{r}
+cat("Missing values:" ,sum(is.na(risk_data)))
+cat('Duplicated IDs:', sum(duplicated(risk_data[,1])))
+cat('Duplicated records:', sum(duplicated(risk_data[,-1])))
+```
+
+Our Dataset was already cleaned: no missing values were found. Also no IDs and no records were duplicated, so we are sure about having data about 4117 different customers.
+
+### Format Conversion
+
+Notice that, even if variables such as Numkids, Numcards, Storecar and Loans appear as numerical, their range is so short that classifying them into categories would be more efficient for us. Therefore, we now transform them into categorical variables.
+
+The variable 'Credit_score' is transformed by R into a categorical variable given that the comma is used to separate integers from decimals. We can replace the comma with the dot and transform it into a double variable
+
+```{r}
+# to factor variables
+risk_data$Storecar       <- as.factor(risk_data$Storecar)
+risk_data$Numcards       <- as.factor(risk_data$Numcards)
+risk_data$Numkids        <- as.factor(risk_data$Numkids)
+risk_data$Loans          <- as.factor(risk_data$Loans)
+risk_data$Howpaid        <- as.factor(risk_data$Howpaid)
+risk_data$Gender         <- as.factor(risk_data$Gender)
+risk_data$Mortgage       <- as.factor(risk_data$Mortgage)
+
+# to double variables
+risk_data$Credit_score       <- gsub(",", ".", risk_data$Credit_score)
+risk_data$Credit_score       <- as.double(risk_data$Credit_score)
+```
+
+### Target Transformation 
+
+The *Risk* variable is the target variable of our problem. To effectively use it, however, we need to preprocess it. We introduced a new target variable based on the latter- called *Flag_Risk* - and assigned the value 1 if the variable Risk was "good risk", 1 in the other case.
+
+This was made mainly to have a binary categorical variable, easier to deal with and to be exploited in creating predictive models.
+
+```{r}
+risk_data$Flag_Risk<- ifelse(as.character(risk_data$Risk) == ("good risk"),1, 0 )
+risk_data<-risk_data[,-c(1,16)] #removing the id and the initial risk variable 
+
+risk_data$Flag_Risk <- as.factor(risk_data$Flag_Risk)
+head(risk_data)
+```
+After cleaning and correctly classifying our data, we can move on to the exploratory data analysis.
+
+# Exploratory Data Analysis (EDA)
+
+Now we investigate the relationship between the independent variables and the target variable, in order to find which, out of our explanatory variables, can help us the most in predicting the Flag Risk target. This step is also very useful to understand which variables can be discarded to reduce the dimensionality of our problem. Considering all of them beyond their relevance could create noise and waste computing power. 
+
+We split our analysis depending on the kind of variables taken into consideration: categorical or continuous. Then for each subset of variables we will carry out a qualitative and quantitative analysis.
+
+```{r}
+cat_var <- names(risk_data)[sapply(risk_data, is.factor)]
+num_var <- names(risk_data)[sapply(risk_data, is.numeric)]
+cat_var <- cat_var[-length(cat_var)] #Remove the flag variable
+```
+
+
+## Categorical Variables
+
+**Qualitative Analysis**
+
+```{r}
+for (i in cat_var){
+ data<-risk_data[,c(i,"Flag_Risk")]
+ grouped_data <- aggregate(data, by=list(data[,1], data$Flag_Risk), FUN=length)
+
+ grouped_data$provaz<-tapply(grouped_data[,3], grouped_data$Group.1, FUN=sum)
+ grouped_data$percent<-paste0(round(grouped_data[,3]/grouped_data[,5]*100,2), '%')
+ print(ggplot(grouped_data, aes(Group.1, grouped_data[,3], fill = factor(Group.2)))+
+   scale_fill_manual(values=c("#EA8553" , "brown"))+ 
+   geom_bar(stat = "identity", position = "stack") + 
+   geom_text(aes(label = percent), position = position_stack(vjust = 0.5), size = 2) +
+   xlab("Variable") +
+   ylab("Count") +
+   labs(fill='Flag_Risk') +
+   labs(title= bquote(.("Conditional Distribution of") ~italic(.("Flag_Risk")) ~"by" ~italic(.(colnames(grouped_data)[3])))))
+   #ggtitle(substitute(paste("Conditional Distribution of Default by ", italic(expression(colnames(grouped_data)[3]))))))
+}
+```
+
+By looking at the plots we can gain some valuable insights and make some hypotehsis on the behavior of our customers:
+* Gender and marital: We can see that the percentage of good and bad customers is equal for any level of the categorical variables. We can hypothesize that those variables will be irrelevant in discriminating between good and bad customers. 
+* Numkids: The distribution of good risk customers follows a u-shaped patter: for 0 and 4 kids we can see a relevant amount of good customers, while for the other levels values are lower.
+* Numcards: This variables presents a u-shaped pattern similar to the one of numkids.
+* Howpaid: People who are paid monthly tend to be less risky than people paid weekly. People paid weekly tend to spend money more frequently than people paid monthly.
+* Storecar: We can observe a negative correlation between the number of cards and the percentage of good customers: a high number of cards indicates a more spending-prone behavior.
+* Loans: Also for loans we can see a u-shaped behavior, indicating a high percentage of good-risk customers with 0 (predictable) and 3 loans (contrary to expectations).
+* Mortgage: people with an active mortgage tend to be safer customers. 
+
+**Quantitative Analysis**
+
+After a first overview of our data, we can now implement some statistically significant techniques to study the correlation between our target and independet variables.
+A good methodology is the  *chi-squared test*.
+
+Pearson's $\chi^2$ is a global measure of discrepancy between the observed frequencies and the expected frequencies under the null of no association between variables. The expected frequencies are defined as $$n^*_{ij}=\frac{n_{i.}n_{.j}}{n}$$ where $n_{i.}$ are the row totals and $n_{.j}$ are the column totals.
+The measures based on Pearson's $\chi^2$ are sensitive to whichever deviation from the condition of independency between characters. The $\chi^2$ is defined as
+
+$$\chi^2=\sum_{i=1}^{r}\sum_{j=1}^c\frac{(n_{ij}-n^*_{ij})^2}{n^*_{ij}}=n\left[\sum_{i=1}^{r}\sum_{j=1}^c\frac{n_{ij}^2}{n_{i.}n_{.j}}-1\right]\sim\chi^2_{(r-1)(c-1)}$$
+
+
+```{r}
+for (i in cat_var){
+  cat("Chi-squared test for variable:", i, "\n")
+
+  print(table(risk_data[,i], risk_data[,last]))
+  print(prop.table(table(risk_data[,i], risk_data[,last]),1)*100)
+  print(chisq.test(risk_data[,i], risk_data[,last]))
+  cat('---------------------------------------------------------------- \n')
+}
+```
+
+When the p-value overcomes the 0.05 treshold we cannot reject the null hypothesis, indicating that there is not enough evidence to conclude that the variables are associated. The statistical test confirms our initial hypotehsis about gender and marital, where we can see that the distribution of good and bad risk customers is percentually equal among all levels of the 2 variables. 
+
+In the case instead where the p-value is below the treshold, we can reject the null hypothesis of independence and conclude that there is evidence of a dependency between the variables. This is the case for all the other categorical variables, which show a p-value way below the 0.05 value, almost equal to 0.
+
+
+## Continous variables
+
+We can now continue our analysis with the numerical variables.
+
+**Qualitative Analysis**
+
+```{r}
+plot_list <- list()
+for  (i in num_var){
+  
+  graph <- ggplot(data = risk_data, aes_string(x = i, fill = 'Flag_Risk')) + scale_fill_manual(values=c("#EA8553" , "brown")) +
+     geom_density(alpha = 0.5) + 
+     labs(title = paste("Density Plot of",i)) 
+  
+  plot(graph + theme(plot.title = element_text(hjust = 0.5)))
+  }
+```
+By analyzing the density distribution of our numerical vairables we can see that:
+ * Age: Older customers tend to be better customers and less riskier than younger pepole.
+ * Income: the majority of bad customers have an income lower than 30k, but this is in accordance with the whole income distribution. For good customers the curve is flattened, showing that richer customers tend to be safer
+ * Employed_Days: people employed for a higher number of days are less risky. this can be due to their higher savings and higher number of wages received. We can see how those distribution have a shape very similar to the one of the "Age" variable. 
+ * Loan amount: Customers considered bad tend to have a lower koans amount, while customers considered safe are more evenly distributed. 
+ * Mortgage amount: the distribution is almost the same, with the mean bit shifted to the left for safe customers, indicating that people with a lower mortgage tend to be safer.
+ * Credit score: Good customers tend to have a higher credit score, so a better spending behavior, than customers considered bad. 
+ 
+**Quantitative Analysis**
+Now, following the same pattern used for categorical variables, we can perform the t-test for the difference of means to assesses whether the difference between the means is statistically different from zero. If the p-value is less than the significance level (p < 0.05), we can reject the null hypothesis and conclude that there is evidence of a significant difference between the means. 
+We applied this test to understand if the values between good and bad customers were significantly different, and if the variables could be used as a discriminator in predictive models.
+
+
+```{r}
+for (i in num_var){
+  cat(i,'\n')
+  print(t.test(risk_data[,i]~risk_data$Flag_Risk,var.equal = FALSE, alternative = 'two.sided'))
+  cat('---------------------------------------------------------------- \n')
+}
+```
+From the p-values analysis we can see how only one variable is abvoe the treshold of 0.05: **Loan_amount**. The means are almost equal even if the 2 distributions are slightly different. This difference however is not strong enough to consider the variable significant.
+
+# Correlation matrix
+
+Let's now plot the correlation matrix between our numerical variables.
+The numbers displayed are the correlation times 100, to have a better-looking and more understandable plot.
+
+```{r}
+corr_mat = cor(risk_data[sapply(risk_data, is.numeric)])
+col <- colorRampPalette(c("#EE9988", "#FFFFFF","#BB4444"))
+
+corrplot(corr_mat, method="color", col=col(200),tl.cex = 0.7,  
+         type="upper", order="hclust", 
+         addCoef.col = "black", # Add coefficient of correlation
+         addCoefasPercent = TRUE,
+         tl.col="black", tl.srt=45, #Text label color and rotation
+         # Combine with significance
+         # hide correlation coefficient on the principal diagonal -> in this case we should use false
+         diag=TRUE
+         )
+
+```
+From the correlation matrix we can spot a strong correlation between age and employed days. This correlation makes sense, since the number of years a person has worked is correlated with the years a person has lived.
+
+```{r}
+plot(risk_data$Age, risk_data$Employed_days, col = "Sienna", xlab = 'Age', ylab='Employed days', main = 'Age vs. Employed days', )
+```
+We can see the high correlation between the 2 variables from the plot above. To avoid collinearity problems, we can merge the 2 variables together using a ratio: Employed_days/Age. the higher this number, the higher the number of days of your lige you have worked.
+
+```{r}
+risk_data$Working_ratio <- risk_data$Employed_days/(risk_data$Age)
+ graph <- ggplot(data = risk_data, aes_string(x = risk_data$Working_ratio, fill = 'Flag_Risk')) + scale_fill_manual(values=c("#EA8553" , "brown")) +
+     geom_density(alpha = 0.5) +
+     labs(title = paste("Density Plot of Employed_days/Age")) 
+  
+  plot(graph + theme(plot.title = element_text(hjust = 0.5)))
+```
+
+
+```{r}
+plot1 <- plot(risk_data$Employed_days, risk_data$Loan_amount, col = '#D2691E', xlab = 'Employed days', ylab='Loan amount', main = 'Employed days vs. Loan amount')
+plot2 <- plot(risk_data$Age, risk_data$Loan_amount, col = '#D2691E', xlab = 'Age', ylab='Loan amount', main = 'Age vs. Loan amount')
+```
+
+```{r}
+col_names <- colnames(risk_data)
+col_names[length(col_names)+1] <-'Flag_Risk'
+col_names <- col_names[-c(1,3,4,8,11,15)] #Age, employed_days, Loan amount
+risk_data <- risk_data[,as.vector(col_names)]
+```
+
+
+We can see the slight correlation between the variables graphically. However the correlation is not strong enough to remove the variables.
+
+```{r}
+corr_mat = cor(risk_data[sapply(risk_data, is.numeric)])
+
+corrplot(corr_mat, method="color", col=col(200),tl.cex = 0.7,  
+         type="upper", order="hclust", 
+         addCoef.col = "black", # Add coefficient of correlation
+         addCoefasPercent = TRUE,
+         tl.col="black", tl.srt=45, #Text label color and rotation
+         # Combine with significance
+         # hide correlation coefficient on the principal diagonal -> in this case we should use false
+         diag=TRUE
+         )
+
+```
+
+After removing aggregating together the 2 variables we can see how the correlation between variables is not significant.
+
+
+# Classification task
+
+We now enter the core of this research: classify good customers in order to allow the company/bank to spend money in a wiser way by targeting only the ones with a higher likelihood of being profitable.  
+
+Before proceeding with the development of classification algortihms, some preliminary "adjustments" need to be done.
+
+## Partitioning the dataset
+
+The dataset will be split into training set, where the models will be built (70% of the total data), and a test set, where the model performance will be evaluated (30% of the total data).
+
+```{r}
+# Normal partitioning
+
+dataset<-risk_data
+
+set.seed(2)
+
+# test/train
+intrain<- createDataPartition(dataset$Flag_Risk,p=0.7,list=FALSE) 
+training<- dataset[intrain,]
+testing<- dataset[-intrain,]
+
+cat ("TRAIN dim:\n")
+table(training$Flag_Risk)
+
+cat ("\n\nTEST dim:\n")
+table(testing$Flag_Risk) 
+```
+
+**Validation Set**
+
+To tune the hyper parameters of our models, the training set will be split a second time into two groups: the actual training set, and the validation set, still following a 70/30 ratio. The training set will be used to build the model, the validation to “validate” it.
+
+Subsequently, these samples will be “continuously exchanged”, according to the cross-validation technique, which allows to dynamically change the data included in both fractions. In this way, the model is trained with regards to several different subdivisions, thus avoiding problems of overfitting, as well as of asymmetrical sampling.
+
+Data contained in these two sets are mutually exclusive (no data is submitted twice) and exhaustive (all the data available in the original/full training set are used).
+
+
+```{r}
+set.seed(2)
+
+# test/train
+intrain<- createDataPartition(training$Flag_Risk,p=0.7,list=FALSE) 
+training_f<- training[intrain,]
+validation<- training[-intrain,]
+
+cat ("Train dim:\n")
+table(training_f$Flag_Risk)
+
+cat ("\n\nValidation dim:\n")
+table(validation$Flag_Risk) 
+```
+
+## Profit Evaluation - Threshold selection
+
+The task of our problem is to find customers that are considered good mainly for 2 reasons:
+
+* **Advertising**: The company wants to focus its resources on a tailored marketing campaign, to heavily invest on customers that will likely be profitable in the future
+* **Monetary**: When targeting a customer, the company invests a high amount of money on the campaign and does not want to waste those money on a non-profitable customer. 
+
+For this reason, when comparing our models, we will focus mainly on **precision**, measuring  the rate of true positives over all the positives predicted. Also having a good level of **sensitivity** would be good for our problem, but loosing a probably profitable customer is better than investing heavily on a customer that will return losses. To balance these two metrics a function has been written.
+
+Let's say we want to set our threshold to improve sensitivity -> capture as many 1s (good customers) as possible. We could clearly forecast each client as risky, but this would entail several costs, both from a monetary and reputational point of view. For this reason we constructed an hypothetical function that balances the number of correctly predicted risky customer (true negative) with the wrongly predicted ones (false positive). False negatives, on the other hand, represent a loss of potential profits , hence not a concrete loss of money; therefore we decided not to penalize for them.
+
+Since we do not possess any information about the cost for the marketing campaign, neither about the profits/losses that a customer may lead to, we used arbitrary coefficients. Eventually, the bank could easily adapt those value in order to fullfill its needs.
+
+```{r}
+
+risk_balance <- function(cm) {
+  
+  FP = cm$table[2,1]
+  TP = cm$table[2,2]
+  PP = sum(cm$table[2,])
+  
+  res <- -10*PP +1000*TP - 700*FP
+  
+  return(res)
+}
+```
+
+Within the function, we gave a lot of importance to the revenues generated by the 1s, with a magnitude of 10. 
+
+For what concern false positives, we considered a loss of magnitude -7. We recall that FP contains both "bad risk" as well as "bad profit" customers, with the latter referring to customers who still generate revenues for our company but for whom it's not worth the investment. Given that this task is about finding the most profitable customers, we can consider them only as a waste of time/resources. Their contribution therefore "positively" balance the loss that can cause instead "bad risk" customers.
+
+As said before, customers wrongly predicted as risky do not represent a real loss, since we did not spend any budget for them, nor they caused us a loss of money. For this reason, they will not be considered in this analysis.
+
+```{r}
+optimal_thr <- function(prob, ds) {
+  
+
+  threshold<- seq(0.3,0.7,0.1)
+  best_val <- 0
+  limit <- 0
+  
+  for (i in threshold){
+  
+    pred_temp <- as.factor(ifelse(prob > i,1,0))
+    
+    val <- risk_balance(confusionMatrix(pred_temp, ds$Flag_Risk, positive = '1' ) )
+    if (val > best_val){
+      best_val<-val
+      limit <- i
+    }}
+  
+  return(c(best_val, limit))
+}
+
+```
+
+## Model Building  
+
+In order to have more consolidated results, we'll compare 4 algorithms:
+
+- Logistic Regression
+- LDA
+- QDA
+- K-nn
+
+### Logistic Regression
+
+We start by implementing a logistic regression, keeping all the variables.
+```{r}
+first_lr <- glm(Flag_Risk~., data=training_f, family='binomial')
+summary(first_lr)
+```
+
+```{r}
+prob_lr <- predict(first_lr, validation, type='response')
+stats <- optimal_thr(prob_lr, validation)
+cat('At threshold',stats[2],'we have a forecasted value of:', stats[1],'.\n\n')
+
+pred_lr <- as.factor(ifelse(prob_lr > stats[2],1,0))
+confusionMatrix(pred_lr, validation$Flag_Risk, positive="1")
+```
+We will use this naive model as benchmark for the performances of our improved models. 
+
+#### Stepwise Selection
+
+Stepwise selection is a technique used in statistical modeling to select a subset of predictor variables - the most significant/ contributing wrt the target outcome - from a larger set of potential predictors. Therefore, it reduces the complexity of the model without highly compromising its accuracy.
+
+We can distinguish between three kinds of stepwise variable selection, each based on the "direction" of analysis: backward, forward or both (the combination of the two).
+The backward begins with the full model and, at each step, gradually eliminates variables from the regression model (backward elimination), in order to find a reduced model that best explains the data. The forward starts from zero (Null Model), adding the most significant variable one after the other, until they are finished or a specific limit has been reached. The “both” method allows to combine the aforementioned approaches.
+
+**forward approach**
+In the forward approach we start with an empty model and successively add one predictor at a time based on AIC.
+```{r}
+step_lr.for <- first_lr %>% stepAIC(trace = FALSE, direction = "forward")
+summary(step_lr.for)
+```
+
+**backward approach**
+This method starts with a full model that includes all predictors and successively removes one predictor at a time, again based on AIC.
+```{r}
+step_lr.back <- first_lr %>% stepAIC(trace = FALSE, direction = "backward")
+summary(step_lr.back)
+```
+
+**bidirectional approach**
+tarts with an initial model and alternates between forward and backward steps to add and remove predictors using AIC as a metric.
+
+```{r}
+step_lr.both <- first_lr %>% stepAIC(trace = FALSE, direction = "both")
+summary(step_lr.both)
+```
+
+To choose which one to keep, we compared the performances through the AIC (Akaike Information Criterion), a statistical procedure that balances the goodness of fit of the model with its complexity (a penalization is taken into consideration for additional regressors).
+Consistent with AIC, the optimal model is the one that explains the largest amount of variance by using as few independent variables as possible.
+When applied to the configured models, the backward direction returned better results. As a matter of fact, the forward approach kept all the variables in each run, being penalized for this; alternatively, the combined approach (“both”), took always into consideration the backward approach, emulating it. For this reason, only the just mentioned approach (i.e., backward) will be evaluated in the follow-up of the project.
+
+```{r}
+lr_reduced.prob <- predict(step_lr.back, validation, type='response')
+stats <- optimal_thr(lr_reduced.prob, validation)
+cat('At threshold',stats[2],'we have a forecasted value of:', stats[1],'.\n\n')
+
+lr_reduced.pred <- as.factor(ifelse(lr_reduced.prob > stats[2],1,0))
+confusionMatrix(lr_reduced.pred, validation$Flag_Risk, positive="1")
+```
+
+After finding the treshold of 0.5 with the method described before, we can take a look at the results.
+We have good levels of accuracy, sensitivity and specificity. The accuracy is heavily influenced by the majority presence of 0s, so its the measure we should consider less. 61% among all the good customers are found by our model.
+
+### LDA 
+
+LDA - Linear Discriminant Analysis - is a classification technique that tries to find a linear combination of features that maximally separates the classes. This linear combination is known as the discriminant function. 
+
+LDA calculates the discriminant function using Bayes' theorem and assumes that the covariance matrix is equal across all classes. It projects the data onto a lower-dimensional space by maximizing the ratio of between-class scatter to within-class scatter. In simple terms, LDA finds a linear boundary that best separates the classes.
+
+Again we start with a benchmark model, having all predictors.
+
+```{r}
+lda_full<- lda(Flag_Risk ~ . , family = "binomial", data = training_f)
+lda_full
+```
+
+```{r}
+prob_lda <- predict(lda_full, validation, type='response')$posterior[,2]
+stats <- optimal_thr(prob_lda, validation)
+cat('At threshold',stats[2],'we have a forecasted value of:', stats[1],'. \n\n')
+
+pred_lda <- as.factor(ifelse(prob_lda>stats[2],"1","0"))
+
+confusionMatrix(pred_lda,validation$Flag_Risk, positive="1")
+```
+**Reduced LDA**
+We tried to improve our LDA model by removing the variables considered meaningless by the step-wise approach implemented for the logistic regression. 
+
+```{r}
+lda_reduced<- lda(Flag_Risk ~. -Storecar-Mortgage_amount , family = "binomial", data = training_f)
+lda_reduced
+```
+
+```{r}
+lda_reduced.prob <- predict(lda_reduced, validation, type='response')$posterior[,2]
+stats <- optimal_thr(lda_reduced.prob, validation)
+cat('At threshold',stats[2],'we have a forecasted value of:', stats[1],'. \n\n')
+
+lda_reduced.pred <- as.factor(ifelse(lda_reduced.prob>stats[2],"1","0"))
+
+confusionMatrix(lda_reduced.pred,validation$Flag_Risk, positive="1")
+```
+The reduced model, also for LDA, performs better than the full model. 
+
+### QDA
+
+QDA - Quadratic Discriminant Analysis - can be seen as an evolution of LDA. The main difference is that, instead of assuming a shared covariance matrix, QDA estimates a separate covariance matrix for each class.
+As the name suggests, QDA involves quadratic terms in the discriminant function, making it more flexible and capable of capturing nonlinear relationships between features.
+
+```{r}
+qda_full <- qda(Flag_Risk ~ ., family = "binomial", data = training_f)
+qda_full
+```
+
+```{r}
+prob_qda <- predict(qda_full, validation, type='response')$posterior[,2]
+stats <- optimal_thr(prob_qda, validation)
+cat('At threshold',stats[2],'we have a forecasted value of:', stats[1],'. \n\n')
+
+pred_qda <- as.factor(ifelse(prob_qda>stats[2],"1","0"))
+confusionMatrix(pred_qda, validation$Flag_Risk, positive="1")
+```
+**Reduced QDA**
+We tried to improve our QDA model by removing the variables considered meaningless by the step-wise approach implemented for the logistic regression. 
+
+```{r}
+qda_reduced<- qda(Flag_Risk ~. -Storecar-Mortgage_amount , family = "binomial", data = training_f)
+qda_reduced
+```
+
+```{r}
+qda_reduced.prob <- predict(qda_reduced, validation, type='response')$posterior[,2]
+stats <- optimal_thr(qda_reduced.prob, validation)
+cat('At threshold',stats[2],'we have a forecasted value of:', stats[1],'. \n\n')
+
+qda_reduced.pred <- as.factor(ifelse(qda_reduced.prob>stats[2],"1","0"))
+confusionMatrix(qda_reduced.pred,validation$Flag_Risk, positive="1")
+```
+Also for the QDA approach, a reduced version of the model returned better results. 
+
+**Dataset subsetting**
+
+Given the better performances obtained by the reduced model, we decided to remove the variables Storecar and Mortgage_amount from our dataset.
+
+```{r}
+testing    <- testing[,-c(5,8)]
+training   <- training[,-c(5,8)]
+training_f <- training_f[,-c(5,8)]
+validation <- validation[,-c(5,8)]
+```
+
+
+## Balanced Sample
+
+In order to create a model less incline to over-estimation (of the majority class), we need to balance the training set.
+The validation and the test set, instead, will be kept with the original proportion, since they must reflect the reality.
+
+To balance the training set, the approach chosen was the oversampling of the minority class. This direction was taken, firstly, not to lose information, a disadvantage that we would encounter with undersampling; secondly, and, as a direct consequence, to have a larger plate over which shaping our model.
+
+The function used is the Synthetic Minority OverSampling Technique (Nitesh Chawla, et al., SMOTE, 2002), contained in the performanceEstimation library. It exploit the KNN algortihm to geometrically point in space the various features describing the two classes, and artificially creating new observations along the line that passes between the minority one (i.e., characterized by similar features).
+
+```{r}
+# Over sampling the dataset
+t <- table(training$Flag_Risk)
+training_balanced <- performanceEstimation::smote(Flag_Risk ~ ., training_f, perc.over = (t[1]-t[2])/t[2], 
+                                                  perc.under = t[1]/(t[1]-t[2]))
+
+cat ("\n\nOriginal training:\n")
+table(training_f$Flag_Risk)
+cat ("\n\nTraining Balanced:\n")
+table(training_balanced$Flag_Risk) 
+
+```
+
+We then re-tried all our models on the balanced version of the dataset, to compare performances with respect to the balanced version. 
+
+### Logistic Regression - Balanced
+
+```{r}
+lr_reduced_bal <- glm(Flag_Risk~., data=training_balanced, family='binomial')
+summary(lr_reduced_bal)
+round(exp(lr_reduced_bal$coefficients),3)
+```
+
+```{r}
+lr_reduced_bal.prob <- predict(lr_reduced_bal, validation, type='response')
+stats <- optimal_thr(lr_reduced_bal.prob, validation)
+cat('At threshold',stats[2],'we have a forecasted value of:', stats[1],'\n')
+
+lr_reduced_bal.pred <- as.factor(ifelse(lr_reduced_bal.prob > stats[2],1,0))
+confusionMatrix(lr_reduced_bal.pred, validation$Flag_Risk, positive="1")
+```
+
+### LDA - Balanced
+
+```{r}
+lda_reduced_bal <- lda(Flag_Risk ~., family = "binomial", data = training_f)
+lda_reduced_bal
+```
+
+```{r}
+lda_reduced_bal.prob <- predict(lda_reduced_bal, validation, type='response')$posterior[,2]
+stats <- optimal_thr(lda_reduced_bal.prob, validation)
+cat('At threshold',stats[2],'we have a forecasted value of:', stats[1],'. \n\n')
+
+lda_reduced_bal.pred <- as.factor(ifelse(lda_reduced_bal.prob>stats[2],"1","0"))
+
+confusionMatrix(lda_reduced_bal.pred, validation$Flag_Risk, positive="1")
+```
+
+### QDA - Balanced
+
+```{r}
+qda_reduced_bal <- qda(Flag_Risk ~., family = "binomial", data = training_f)
+qda_reduced_bal
+```
+
+```{r}
+qda_reduced_bal.prob <- predict(qda_reduced_bal, validation, type='response')$posterior[,2]
+stats <- optimal_thr(qda_reduced_bal.prob, validation)
+cat('At threshold',stats[2],'we have a forecasted value of:', stats[1],'. \n\n')
+
+qda_reduced_bal.pred <- as.factor(ifelse(qda_reduced_bal.prob>stats[2],"1","0"))
+
+confusionMatrix(qda_reduced_bal.pred, validation$Flag_Risk, positive="1")
+```
+
+The model trained on the balanced dataset performs worse with respect to the model trained on the unbalanced dataset. The number of true and false positives is almost the same, while the number of false negatives increases heavily. Also the suggested treshold is higher w.r.t. before, with a value of 0.7. This indicates that the model trained on the balanced dataset returns results with a higher level of confidence, but it is more incline on missing some 1s. 
+
+
+## Cross Validation
+
+To check the overall performances of our algorithms we apply now a cross-validation technique, so as to improve the robustness of the models.
+
+To do this we perform a "manual" cross-validation by training and evaluating the model over 100 different training/validation set. In this case we do not exploit any function to perform the cv, therefore we can not guarantee the mutual exclusivity of the different folds; however, the high number of trials lead this aspect to be overcome, as well as the problem of asymmetrical sampling.
+
+```{r}
+cross_val <- function(model, balanced=FALSE){
+  
+  # metrics
+  profit   <- c()
+  prec <- c()
+  auc <- c()
+
+  for (i in 1:100){
+    
+    # just to signal the advancement
+    if (i %in% seq(10,90,10)){
+      cat(i,'% ...\n')
+    }
+  
+    # split into (actual) training set and validation set (70/30)
+    intrain<- createDataPartition(training$Flag_Risk,p=0.7,list=FALSE) 
+    train_f <- training[intrain,]
+    valid <- training[-intrain,]
+  
+    # balancing the training set (oversample of minority cases = 1)
+    if(balanced){
+      t <- table(train_f$Flag_Risk)
+      temp_train <- performanceEstimation::smote(Flag_Risk ~ ., train_f, perc.over = (t[1]-t[2])/t[2], perc.under = t[1]/(t[1]-t[2]))}
+    else{
+      temp_train <- train_f}
+  
+    # build the model
+    if(model=='glm'){
+      temp <- glm(Flag_Risk~., data=temp_train, family=binomial(link='logit'))
+      temp.prob <- predict(temp, valid, type='response')}
+    else if (model=='lda'){
+      temp <- lda(Flag_Risk~., data=temp_train, family=binomial)
+      temp.prob <- predict(temp, valid, type='response')$posterior[,2]}
+    else if (model=='qda'){
+      if(0 %in% table(temp_train$Numcards, temp_train$Flag_Risk)[,2]){next}
+      temp <- qda(Flag_Risk~., data=temp_train, family=binomial)
+      temp.prob <- predict(temp, valid, type='response')$posterior[,2]
+      }
+    else{
+      cat('The model is not available. \n')
+      break}
+  
+    stats_temp <- optimal_thr(temp.prob, valid)
+    profit <- append(profit, stats_temp[1])
+    temp.pred <- as.factor(ifelse(temp.prob >stats_temp[2], 1, 0))
+    
+    # evaluate it through ROC curve (precisely by the Area Under the Curve, AUC)
+    prob.roc_temp <- ROCR::prediction(temp.prob, valid$Flag_Risk)
+    auc_temp <- ROCR::performance(prob.roc_temp, "auc")
+    auc <- append(auc, as.numeric(auc_temp@y.values))
+    
+    # precision
+    cm_temp <- confusionMatrix(temp.pred, valid$Flag_Risk, positive='1')
+    prec <- append(prec, cm_temp$table[2,2]/sum(cm_temp$table[2,]))
+  
+  }
+
+  cat('Done')
+
+  return(list(profit, prec, auc))
+}
+
+```
+
+We will then implement the cv on all our models to find out which one is more stable under different datasets (the model with lower variance). 100 runs will be performed both for the balanced and unbalanced version of our algorithms. At the end we will display the summary of the 100 results obtianed for the metrics: **profits**, **precision** and **AUC**.
+
+### Logistic Regression - Unbalanced Sample
+
+```{r}
+lr_unbal.res <- cross_val('glm')
+```
+**Profits**
+```{r}
+summary(lr_unbal.res[[1]])
+```
+**Precision**
+```{r}
+summary(lr_unbal.res[[2]])
+```
+**AUC**
+```{r}
+summary(lr_unbal.res[[3]])
+```
+
+### Logistic Regression - Balanced Sample
+
+```{r}
+lr_bal.res <- cross_val('glm', balanced=TRUE)
+```
+
+
+
+**Profits**
+```{r}
+summary(lr_bal.res[[1]])
+```
+**Precision**
+```{r}
+summary(lr_bal.res[[2]])
+```
+**AUC**
+```{r}
+summary(lr_bal.res[[3]])
+```
+
+### Linear Discriminant Analysis - Unbalanced Sample
+
+```{r}
+lda_unbal.res <- cross_val('lda')
+```
+
+**Profits**
+```{r}
+summary(lda_unbal.res[[1]])
+```
+**Precision**
+```{r}
+summary(lda_unbal.res[[2]])
+```
+**AUC**
+```{r}
+summary(lda_unbal.res[[3]])
+```
+
+### Linear Discriminant Analysis - Balanced Sample
+
+```{r}
+lda_bal.res <- cross_val('lda', balanced=TRUE)
+```
+
+**Profits**
+```{r}
+summary(lda_bal.res[[1]])
+```
+**Precision**
+```{r}
+summary(lda_bal.res[[2]])
+```
+**AUC**
+```{r}
+summary(lda_bal.res[[3]])
+```
+
+
+### Quadratic Discriminant Analysis - Unbalanced Sample
+
+```{r}
+qda_unbal.res <- cross_val('qda')
+```
+
+**Profits**
+```{r}
+summary(qda_unbal.res[[1]])
+```
+**Precision**
+```{r}
+summary(qda_unbal.res[[2]])
+```
+**AUC**
+```{r}
+summary(qda_unbal.res[[3]])
+```
+
+### Quadratic Discriminant Analysis - Balanced Sample
+
+```{r}
+set.seed(2)
+qda_bal.res <- cross_val('qda', balanced=TRUE)
+```
+
+```{r}
+summary(qda_bal.res[[1]])
+```
+**Precision**
+```{r}
+summary(qda_bal.res[[2]])
+```
+**AUC**
+```{r}
+summary(qda_bal.res[[3]])
+```
+
+## Results/Model comparison
+We can now plot the results to analyze and compare the performances of different models.
+
+### Profits
+
+```{r}
+data <- list(summary(qda_bal.res[[1]]), summary(qda_unbal.res[[1]]),
+             summary(lda_bal.res[[1]]), summary(lda_unbal.res[[1]]),
+             summary(lr_bal.res[[1]]), summary(lr_unbal.res[[1]]))
+
+colors <- brewer.pal(length(data), "Reds")
+boxplot(data, names = c("QDA bal", "QDA unb", "LDA bal", "LDA unb", "LR bal", "LR unbal"), col=colors,
+        ylab = "Values", main = "Profits")
+```
+
+### Precision
+
+```{r}
+
+data <- list(summary(qda_bal.res[[2]]), summary(qda_unbal.res[[2]]),
+             summary(lda_bal.res[[2]]), summary(lda_unbal.res[[2]]),
+             summary(lr_bal.res[[2]]), summary(lr_unbal.res[[2]]))
+
+colors <- brewer.pal(length(data), "Reds")
+boxplot(data, names = c("QDA bal", "QDA unb", "LDA bal", "LDA unb", "LR bal", "LR unbal"), col=colors,
+        ylab = "Values", main = "Precision")
+```
+
+### ROC - AUC
+
+```{r}
+plot_colors <- brewer.pal(length(data), "Reds")
+text <- c("LR_step", "LDA", "QDA")
+
+
+#Logistic Regression - balanced
+p1 <- predict(step_lr.back, validation, type="response")
+pr1 <- prediction(p1, validation$Flag_Risk)
+perf1<-ROCR::performance(pr1, measure = "tpr", x.measure = "fpr")
+plot(perf1, col=plot_colors[4], main="ROC curve")
+
+#LDA
+lda_reduced <- lda(Flag_Risk ~., family = "binomial", data = training_f)
+p2 <- predict(lda_reduced, validation)$posterior
+pr2 <- prediction(p2[,2], validation$Flag_Risk)
+perf2<-ROCR::performance(pr2, measure = "tpr", x.measure = "fpr")
+plot(perf2, col=plot_colors[6], add=TRUE)
+
+#QDA
+qda_reduced <- qda(Flag_Risk ~., family = "binomial", data = training_f)
+p3 <- predict(qda_reduced, validation, type="response")$posterior
+pr3 <- prediction(p3[,2], validation$Flag_Risk)
+perf3<-ROCR::performance(pr3, measure = "tpr", x.measure = "fpr")
+plot(perf3, col=plot_colors[2], add=TRUE)
+
+
+lines(x = c(0,100), y = c(0,100), col='grey')
+legend("bottomright", legend=text, col=plot_colors[c(4,6,2)], lwd=2)
+```
+
+
+```{r}
+data <- list(summary(qda_bal.res[[3]]), summary(qda_unbal.res[[3]]),
+             summary(lda_bal.res[[3]]), summary(lda_unbal.res[[3]]),
+             summary(lr_bal.res[[3]]), summary(lr_unbal.res[[3]]))
+
+colors <- brewer.pal(length(data), "Reds")
+boxplot(data, names = c("QDA bal", "QDA unb", "LDA bal", "LDA unb", "LR bal", "LR unbal"), col=colors,
+        ylab = "Values", main = "AUC")
+```
+By taking a look at all the metrics on hand, we can see how the models trained on the unbalanced dataset perform better than models trained on the balanced version. This can be due to many different factors:
+* Overfitting: by oversampling we introduce data entries that create noise in our data and make our model overfit.
+* Noise in the distribution: By introducing synthetic data points, the artificial distribution we've created might deviate from the true data distribution, leading to a decrease in performance.
+Our dataset was also not heavily unbalanced, with a good-enough percentage of the minority class to avoid oversampling. We tried this technique to see if performances improved. 
+
+### Model Improvement - Optimizing LR
+
+**Regularization**
+
+We try now to regularize our logistic regression model by implementing two different regularization techniques: lasso and ridge regression.
+
+**Lasso**
+
+This approach utilizes a l1-norm penalty to shrink the coefficients.
+The lasso regression coefficient estimate $\beta^L$ is computed as:
+
+$$\hat{\beta}^L=arg\space min_b \space\{(y - X\beta)^T(y - X\beta) +\lambda\sum_{j=1}^{p}|\beta_j|\}$$
+
+Before starting, we apply some data transformation; transform dataframes into matrices given that glmnet is compatible only with this data-type.
+```{r}
+#Subset variables to transform into dummies
+#Subset variables to transform into dummies
+cat_var_tr <- names(training_f)[sapply(training_f, is.factor)]
+cat_var_tr <- cat_var_tr[-length(cat_var_tr)]
+
+#Create dummies
+tr_dummies <- dummy_cols(training_f, select_columns = cat_var_tr)
+val_dummies <- dummy_cols(validation, select_columns = cat_var_tr)
+test_dummies <- dummy_cols(testing, select_columns = cat_var_tr)
+
+#Find the duplicate columns
+to_keep <- setdiff(colnames(tr_dummies),cat_var_tr)
+to_keep[length(to_keep)+1] <- 'Flag_Risk'
+to_keep<-to_keep[-4]
+
+#Filter
+tr_dummies <- tr_dummies[,to_keep]
+val_dummies <- val_dummies[,to_keep] 
+test_dummies <-  test_dummies[,to_keep]
+```
+
+```{r}
+train_reg <- as.matrix(tr_dummies[,-length(tr_dummies)])
+valid_reg <- as.matrix(val_dummies[,-length(val_dummies)])
+test_reg <-  as.matrix(test_dummies[,-length(test_dummies)])
+```
+
+Create a grid of 100 possible $\lambda$ to use as a regularization parameter. A cv process will be used to determine the best value for $\lambda$. We used a logarithmic scale to have a number of values more dense around the 0, given that our coefficients are in the order of tens.
+
+```{r}
+log_lambda_grid <- seq(0, -4, length=100) 
+lambda_grid <- 10^log_lambda_grid
+plot(x = lambda_grid, lambda_grid, col = 'brown')
+```
+
+After plotting the different lambdas we can implement our L1 regularization: we create 100 different models, each one with a different value of the $\lambda$ hyper parameter. We store and display the coefficients to show the effect L1 has on feature selection.
+
+```{r}
+L1_models <- glmnet(train_reg, tr_dummies$Flag_Risk, alpha=1, lambda=lambda_grid, family="binomial")
+L1_coef <- coef(L1_models)
+round(L1_coef[, c(1:3, 98:100)], 6)
+```
+
+We can plot the behavior of the coefficients w.r.t. the different lambdas.
+
+```{r}
+L1_coef_Df <- data.frame(t(as.matrix(L1_coef)[-1,]))
+L1_coef_Df$grid <- log_lambda_grid
+
+L1_melted <- suppressWarnings( melt(L1_coef_Df, id.vars="grid"))
+
+ggplot(L1_melted, aes(grid, value, col = variable)) + geom_line(size=1) +
+  xlab('log(lambda)') + ylab('Coefficients')
+```
+
+The stronger coefficients, so the ones resisting the most to features selection are: Income, credit_score, loans_0, working_ratio, numcards_6 . Some of them are not clearly observable from the graph given that the coefficient is small (≈ 0.5) but still different from 0. We can now move on to the model evaluation part, in which we compare performances of the different models on both the training and validation set. We kept 0.5 treshold value found as best in the logistic regression.
+
+```{r}
+valid_prob <- predict(L1_models, valid_reg, type='response')
+train_prob <- predict(L1_models, train_reg, type='response')
+```
+
+
+```{r}
+valid_acc_list <- c()
+valid_prec_list <- c()
+
+train_acc_list <- c()
+train_prec_list <- c()
+
+profits <- c()
+
+for(i in 1:100){
+  valid_pred <- as.factor(ifelse(valid_prob[,i] < 0.5, 0, 1))
+  train_pred <- as.factor(ifelse(train_prob[,i] < 0.5, 0, 1))
+  
+  cm_prof <- suppressWarnings( confusionMatrix(valid_pred,as.factor(val_dummies$Flag_Risk), positive = "1"))
+  cm_val <- cm_prof$table
+  acc_v <- (cm_val[1,1]+cm_val[2,2])/sum(cm_val)
+  prec_v <- cm_val[2,2]/sum(cm_val[2,]+1)
+
+  valid_acc_list <- c(valid_acc_list, acc_v)
+  valid_prec_list <- c(valid_prec_list, prec_v)
+  
+  prof <- risk_balance(cm_prof)
+  profits <- c(profits, prof)
+  
+  cm_tr <- suppressWarnings( confusionMatrix(train_pred,as.factor(tr_dummies$Flag_Risk), positive = "1")$table)
+  acc <- (cm_tr[1,1]+cm_tr[2,2])/sum(cm_tr)
+  prec <- cm_tr[2,2]/sum(cm_tr[2,]+1)
+
+  train_acc_list <- c(train_acc_list, acc)
+  train_prec_list <- c(train_prec_list, prec)
+  
+}
+
+valid_acc_list[c(1:2, 99:100)]
+train_acc_list[c(1:2, 99:100)]
+```
+
+We can now plot the metrics of interest for each lambda. Not all values were kept since after a certain value all data entries are classified as 0 (only intercept, all coefficients gone to 0).
+
+```{r}
+colors <- brewer.pal(9, "Reds")
+plot(x = lambda_grid[18:100], valid_prec_list[18:100], type = 'l', col = colors[3], xlab = 'Lambdas', ylab = 'Score value')
+lines(x = lambda_grid, valid_acc_list, type = 'l', col = colors[4])
+lines(x = lambda_grid, train_acc_list, type = 'l', col =colors[7])
+lines(x = lambda_grid, train_prec_list, type = 'l', col =colors[9])
+
+legend('bottomleft',legend = c('prec_val','acc_val','acc_train','prec_train'), lwd = 2, col = colors[c(3,4,7,9)])
+```
+
+The accuracies of train and val are almost overlapped, that's why we can see only the training one. We can now plot the profits related to different lambdas. we focused only on the "interesting" section of the graph, since after a certain value of lambdas profits start to decrease.
+
+```{r}
+plot(x = lambda_grid[50:100], profits[50:100], type = 'l', col = colors[7], xlab = 'Lambdas', ylab = 'Profits')
+```
+
+```{r}
+cat(max(profits),'\n')
+cat(levels(as.factor(profits[98:100])))
+best_lambda_l1 <- lambda_grid[98]
+```
+
+If we focus only on precision, we obtain a model that performs very badly in monetary performances. We choose the best lambda by focusing on the one maximizing profits. We can now create our final L1 model.
+
+```{r}
+L1_model_fin <- glmnet(train_reg, tr_dummies$Flag_Risk, alpha=1, lambda=best_lambda_l1, family="binomial")
+valid_prob <- predict(L1_model_fin, valid_reg, type='response')
+valid_pred <- as.factor(ifelse(valid_prob < 0.5, 0, 1))
+confusionMatrix(valid_pred,as.factor(val_dummies$Flag_Risk), positive = "1")
+```
+
+**Ridge**
+
+This approach, on the other hand, exploits the l2-norm to shrink the coefficients.
+The ridge regression coefficient estimates $\beta^R$ is computated as:
+
+$$\hat{\beta}^R=arg\space min_b \space\{(y - X\beta)^T(y - X\beta) +\lambda\sum_{j=1}^{p}\beta_j^2\}$$
+The decision-making process for finding the best lambda is the same for L1.
+
+```{r}
+set.seed(2)
+L2_models <- glmnet(train_reg, tr_dummies$Flag_Risk, alpha=0, lambda=lambda_grid, family="binomial")
+L2_coef <- coef(L2_models)
+round(L2_coef[, c(1:3, 98:100)], 6)
+```
+
+```{r}
+set.seed(2)
+valid_prob <- predict(L2_models, valid_reg, type='response')
+train_prob <- predict(L2_models, train_reg, type='response')
+```
+
+
+```{r}
+valid_acc_list <- c()
+valid_prec_list <- c()
+
+train_acc_list <- c()
+train_prec_list <- c()
+
+profits <- c()
+
+for(i in 1:100){
+  valid_pred <- as.factor(ifelse(valid_prob[,i] < 0.5, 0, 1))
+  train_pred <- as.factor(ifelse(train_prob[,i] < 0.5, 0, 1))
+  
+  cm_prof <- suppressWarnings( confusionMatrix(valid_pred,as.factor(val_dummies$Flag_Risk), positive = "1"))
+  cm_val <- cm_prof$table
+  acc_v <- (cm_val[1,1]+cm_val[2,2])/sum(cm_val)
+  prec_v <- cm_val[2,2]/sum(cm_val[2,]+1)
+
+  valid_acc_list <- c(valid_acc_list, acc_v)
+  valid_prec_list <- c(valid_prec_list, prec_v)
+  
+  prof <- risk_balance(cm_prof)
+  profits <- c(profits, prof)
+  
+  cm_tr <- suppressWarnings( confusionMatrix(train_pred,as.factor(tr_dummies$Flag_Risk), positive = "1")$table)
+  acc <- (cm_tr[1,1]+cm_tr[2,2])/sum(cm_tr)
+  prec <- cm_tr[2,2]/sum(cm_tr[2,]+1)
+
+  train_acc_list <- c(train_acc_list, acc)
+  train_prec_list <- c(train_prec_list, prec)
+  
+}
+
+valid_acc_list[c(1:2, 99:100)]
+train_acc_list[c(1:2, 99:100)]
+```
+
+We can now plot the metrics of interest for each lambda.
+
+```{r}
+colors <- brewer.pal(9, "Reds")
+plot(x = lambda_grid, valid_prec_list, type = 'l', col = colors[3], xlab = 'Lambdas', ylab = 'Score value')
+lines(x = lambda_grid, valid_acc_list, type = 'l', col = colors[4])
+lines(x = lambda_grid, train_acc_list, type = 'l', col =colors[7])
+lines(x = lambda_grid, train_prec_list, type = 'l', col =colors[9])
+
+legend('bottomleft',legend = c('prec_val','acc_val','acc_train','prec_train'), lwd = 2, col = colors[c(3,4,7,9)])
+```
+
+The accuracies of train and val are almost overlapped, that's why we can see only the training one. We can now plot the profits related to different lambdas. we focused only on the "interesting" section of the graph, since after a certain value of lambdas profits start to decrease.
+
+```{r}
+plot(x = lambda_grid[50:100], profits[50:100], type = 'l', col = colors[7], xlab = 'Lambdas', ylab = 'Score value')
+```
+
+By looking at the lambda maximizing profits, we can see how the first 18 values are all equal to the maximum value (this behavior can be observed from the graph above). We choose the highest lambda among the group, so the one with the highest regularization.
+
+```{r}
+cat(max(profits),'\n')
+cat(levels(as.factor(profits[89:100])))
+best_lambda_l2 <- lambda_grid[89]
+```
+
+If we focus only on precision, we obtain a model that performs very badly in monetary performances. We choose the best lambda by focusing on the one maximizing profits. We can now create our final L1 model.
+
+```{r}
+L2_model_fin <- glmnet(train_reg, tr_dummies$Flag_Risk, alpha=0, lambda=best_lambda_l2, family="binomial")
+valid_prob <- predict(L2_model_fin, valid_reg, type='response')
+valid_pred <- as.factor(ifelse(valid_prob < 0.5, 0, 1))
+confusionMatrix(valid_pred,as.factor(val_dummies$Flag_Risk), positive = "1")
+```
+
+## K-NN
+
+Let's now try to perform the classification task using a non-parametric model: k-NN. Before applying this distance based algorithm, we need to transform categorical variables into dummy variables, and scale our data to avoid giving too much influence to variables having higher order of magnitude
+
+
+**Scaling data**
+
+```{r}
+#Create function
+scale_values <- function(x){(x-min(x))/(max(x)-min(x))}
+
+#Transform falg into a numerical to apply the function (dummy or 0-1 variables are not affected by scaling)
+tr_dummies$Flag_Risk <- as.integer(tr_dummies$Flag_Risk)
+val_dummies$Flag_Risk <- as.integer(val_dummies$Flag_Risk)
+test_dummies$Flag_Risk <- as.integer(test_dummies$Flag_Risk)
+
+#Apply the scaling
+tr_scaled <- lapply(tr_dummies, scale_values)
+val_scaled<- lapply(val_dummies, scale_values)
+test_scaled <- lapply(test_dummies, scale_values)
+
+tr_scaled <- as.data.frame(tr_scaled)
+val_scaled<- as.data.frame(val_scaled)
+test_scaled <- as.data.frame(test_scaled)
+
+tr_scaled$Flag_Risk <- as.factor(tr_scaled$Flag_Risk )
+val_scaled$Flag_Risk <- as.factor(val_scaled$Flag_Risk )
+test_scaled$Flag_Risk <- as.factor(test_scaled$Flag_Risk )
+
+true_lab_val <- val_scaled[,'Flag_Risk']
+true_lab_test <- test_scaled[,'Flag_Risk']
+
+val_scaled <- val_scaled[,-length(val_scaled)]
+test_scaled <- test_scaled[,-length(test_scaled)]
+```
+
+**Algorithm**
+
+```{r}
+set.seed(2)
+errors <- c()
+for (i in seq(1,15,2)){
+  classifier_knn <- knn(train = tr_scaled[,c(1:length(tr_scaled)-1)],
+                      test = val_scaled,
+                      cl = tr_scaled$Flag_Risk,
+                      k = i)
+  #classifier_knn <- ifelse(classifier_knn==1,0,1)
+  cm <- confusionMatrix(classifier_knn, true_lab_val)$table
+  misClassError <- (cm[2,1]+cm[1,2])/sum(cm)
+  errors <- c(errors,misClassError)
+}
+plot(x = 1:8,errors, type = 'l', xaxt = 'n', xlab = 'values of K',ylab = 'Error in %', col = 'brown', main = 'Error for different Ks')
+
+axis(side = 1, at = 1:8, labels = seq(1,15,2))
+```
+
+3 and 9 are candidate results to use as best k. Let's compare their behavior
+
+**Results**
+```{r}
+classifier_knn <- knn(train = tr_scaled[,c(1:length(tr_scaled)-1)],
+                      test = val_scaled,
+                      cl = tr_scaled$Flag_Risk,
+                      k = 9)
+cm <- confusionMatrix(classifier_knn, true_lab_val, positive = '1')
+print(cm)
+risk_balance(cm)
+```
+
+```{r}
+classifier_knn <- knn(train = tr_scaled[,c(1:length(tr_scaled)-1)],
+                      test = val_scaled,
+                      cl = tr_scaled$Flag_Risk,
+                      k = 3)
+cm <- confusionMatrix(classifier_knn, true_lab_val, positive = '1')
+print(cm)
+risk_balance(cm)
+```
+
+By comparing the metrics we can see that with **k=9** we have a higher number of TP and a lower number of FP, with both precision and risk_balance metrics being higher. Therefore we decide to keep 9 as the value for the hyper parameter k. 
+
+```{r}
+best_k <- 9
+```
+
+# Conclusion - Comparing models
+We can now re-train models on the full training sets, with the hyperparameters optimized, and test their performances on the test set. We need to adapt to original training set to the k-nn and regularized LR by applying the same data pre-processing implemented before.
+```{r}
+#Subset variables to transform into dummies
+cat_var_tr <- names(training)[sapply(training, is.factor)]
+cat_var_tr <- cat_var_tr[-length(cat_var_tr)]
+
+#Create dummies
+tr_dummies <- dummy_cols(training, select_columns = cat_var_tr)
+
+#Find the duplicate columns
+to_keep <- setdiff(colnames(tr_dummies),cat_var_tr)
+to_keep[length(to_keep)+1] <- 'Flag_Risk'
+to_keep<-to_keep[-4]
+
+#Filter
+tr_dummies <- tr_dummies[,to_keep]
+train_reg <- as.matrix(tr_dummies[,-length(tr_dummies)])
+```
+
+**Scaling data**
+
+```{r}
+#Transform flag into a numerical to apply the function (dummy or 0-1 variables are not affected by scaling)
+tr_dummies$Flag_Risk <- as.integer(tr_dummies$Flag_Risk)
+
+#Apply the scaling
+tr_scaled <- lapply(tr_dummies, scale_values)
+
+tr_scaled <- as.data.frame(tr_scaled)
+
+tr_scaled$Flag_Risk <- as.factor(tr_scaled$Flag_Risk )
+```
+
+**Logistic regression**
+```{r}
+final_Lr <- glm(Flag_Risk~., data=training, family='binomial')
+prob_Lr <- predict(final_Lr, testing, type='response')
+pred_Lr <- as.factor(ifelse(prob_Lr < 0.5, 0, 1))
+```
+
+**Regularized models**
+```{r}
+#Lasso
+final_Lr1 <- glmnet(train_reg, tr_dummies$Flag_Risk, alpha=1, lambda=best_lambda_l1, family="binomial")
+prob_Lr1 <- predict(final_Lr1, test_reg, type='response')
+pred_Lr1 <- as.factor(ifelse(prob_Lr1 < 0.5, 0, 1))
+
+#Ridge
+final_Lr2 <- glmnet(train_reg, tr_dummies$Flag_Risk, alpha=0, lambda=best_lambda_l2, family="binomial")
+prob_Lr2 <- predict(final_Lr2, test_reg, type='response')
+pred_Lr2 <- as.factor(ifelse(prob_Lr2 < 0.5, 0, 1))
+```
+
+**K-NN**
+```{r}
+final_knn <- knn(train = tr_scaled[,c(1:length(tr_scaled)-1)],
+                      test = test_scaled,
+                      cl = training$Flag_Risk,
+                      k = best_k)
+```
+
+**Model comparison**
+```{r}
+profit_Lr <- risk_balance(confusionMatrix(pred_Lr, testing$Flag_Risk, positive="1"))
+profit_Lr1 <- risk_balance(confusionMatrix(pred_Lr1, testing$Flag_Risk, positive="1"))
+profit_Lr2 <- risk_balance(confusionMatrix(pred_Lr2, testing$Flag_Risk, positive="1"))
+profit_KNN <- risk_balance(confusionMatrix(final_knn, testing$Flag_Risk, positive="1"))
+```
+
+
+```{r}
+# Assuming 'values' is a vector of 4 numerical values and 'labels' is a vector of 4 corresponding labels
+values <- c(profit_Lr, profit_Lr1, profit_Lr2, profit_KNN)
+
+# Create a vector of labels for the x-axis
+labels <- c('LR','LR_1','LR_2','K-NN')
+
+colors <- colorRampPalette(c("#EA8553" , "brown"))
+
+# Create the barplot with adjusted ylim
+barplot(values, names.arg = labels, col = colors(4), ylim = c(0, max(values) + 10000))
+
+# Calculate the center position of each bar
+bar_center <- barplot(values, plot = FALSE)
+
+# Add value labels centered on each bar
+text(x = bar_center, y = values, labels = values, pos = 3, col = "black", cex = 0.8)
+
+```
+
+
+
+
+
+
